@@ -46,11 +46,21 @@ export interface Pose {
   score: number;
 }
 
+export interface PoseState {
+  standing: boolean;
+  sitting: boolean;
+  lying: boolean;
+  falling: boolean;
+  confidence: number;
+  lastUpdate: Date;
+}
+
 export interface FallDetectionResult {
   hasFallen: boolean;
   confidence: number;
   reason: string;
   pose?: Pose;
+  poseState?: PoseState;
 }
 
 export interface SystemStatus {

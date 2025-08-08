@@ -3,6 +3,22 @@ import { Alert, Elder, EmergencyContact } from '../types';
 export class AlertService {
   private alerts: Alert[] = [];
   private alertCallbacks: ((alert: Alert) => void)[] = [];
+  private notificationPermission: NotificationPermission = 'default';
+
+  constructor() {
+    this.initializeNotifications();
+  }
+
+  private async initializeNotifications() {
+    if ('Notification' in window) {
+      this.notificationPermission = Notification.permission;
+      
+      if (this.notificationPermission === 'default') {
+        const permission = await Notification.requestPermission();
+        this.notificationPermission = permission;
+      }
+    }
+  }
 
   async sendEmergencyAlert(
     elder: Elder, 
@@ -25,6 +41,9 @@ export class AlertService {
     // Trigger alert callbacks
     this.alertCallbacks.forEach(callback => callback(alert));
 
+    // Send Web Notification
+    await this.sendWebNotification(alert, elder);
+
     // Simulate sending alerts to emergency contacts
     for (const contact of elder.emergencyContacts) {
       await this.sendNotification(contact, alert, elder);
@@ -41,6 +60,29 @@ export class AlertService {
       description: alert.description,
       timestamp: alert.timestamp,
     });
+  }
+
+  private async sendWebNotification(alert: Alert, elder: Elder) {
+    if ('Notification' in window && this.notificationPermission === 'granted') {
+      const notification = new Notification('🚨 CareLoop Fall Alert', {
+        body: alert.description,
+        icon: '/favicon.ico',
+        badge: '/favicon.ico',
+        tag: 'fall-alert',
+        requireInteraction: true,
+      });
+
+      // Handle notification click
+      notification.onclick = () => {
+        window.focus();
+        notification.close();
+      };
+
+      // Auto-close after 30 seconds
+      setTimeout(() => {
+        notification.close();
+      }, 30000);
+    }
   }
 
   private determineSeverity(type: Alert['type']): Alert['severity'] {
@@ -133,6 +175,21 @@ export class AlertService {
     if (index > -1) {
       this.alertCallbacks.splice(index, 1);
     }
+  }
+
+  // Request notification permissions
+  async requestNotificationPermission(): Promise<boolean> {
+    if ('Notification' in window) {
+      const permission = await Notification.requestPermission();
+      this.notificationPermission = permission;
+      return permission === 'granted';
+    }
+    return false;
+  }
+
+  // Get notification permission status
+  getNotificationPermission(): NotificationPermission {
+    return this.notificationPermission;
   }
 
   private saveAlerts(): void {

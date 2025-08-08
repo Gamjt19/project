@@ -2,21 +2,45 @@ import * as tf from '@tensorflow/tfjs';
 import * as posenet from '@tensorflow-models/posenet';
 import { PoseKeypoint, Pose, FallDetectionResult } from '../types';
 
+export interface PoseState {
+  standing: boolean;
+  sitting: boolean;
+  lying: boolean;
+  falling: boolean;
+  confidence: number;
+  lastUpdate: Date;
+}
+
 export class FallDetectionService {
   private model: posenet.PoseNet | null = null;
   private isInitialized = false;
   private lastPoses: Pose[] = [];
   private consecutiveFallFrames = 0;
-  private readonly FALL_THRESHOLD = 2; // consecutive frames needed (reduced for faster detection)
-  private readonly CONFIDENCE_THRESHOLD = 0.5; // reduced for better detection
-  private readonly MIN_POSE_SCORE = 0.3; // minimum score for individual keypoints
+  private consecutiveLyingFrames = 0;
+  private lastPoseState: PoseState = {
+    standing: false,
+    sitting: false,
+    lying: false,
+    falling: false,
+    confidence: 0,
+    lastUpdate: new Date(),
+  };
+
+  // Configurable thresholds
+  private FALL_THRESHOLD = 2; // consecutive frames for fall detection
+  private LYING_THRESHOLD = 3; // consecutive frames for lying detection
+  private CONFIDENCE_THRESHOLD = 0.4; // reduced for better detection
+  private MIN_POSE_SCORE = 0.2; // minimum score for individual keypoints
+  private FALL_ANGLE_THRESHOLD = 25; // degrees for horizontal detection
+  private VERTICAL_MOVEMENT_THRESHOLD = 60; // pixels for sudden drop
+  private RAPID_MOVEMENT_THRESHOLD = 25; // average movement threshold
 
   async initialize(): Promise<void> {
     try {
       // Ensure TensorFlow.js backend is ready
       await tf.ready();
       
-      // Load PoseNet model
+      // Load PoseNet model with optimized settings
       this.model = await posenet.load({
         architecture: 'MobileNetV1',
         outputStride: 16,
@@ -24,7 +48,7 @@ export class FallDetectionService {
         multiplier: 0.75,
       });
       this.isInitialized = true;
-      console.log('Fall detection model initialized');
+      console.log('🚀 Advanced fall detection model initialized');
     } catch (error) {
       console.error('Failed to initialize fall detection:', error);
       throw error;
@@ -62,16 +86,15 @@ export class FallDetectionService {
         confidence: 0,
         reason: 'Low pose confidence',
         pose,
+        poseState: this.lastPoseState,
       };
     }
 
-    // Key body parts for fall detection
+    // Get key body parts
     const keypoints = pose.keypoints;
     const nose = keypoints[0];
     const leftEye = keypoints[1];
     const rightEye = keypoints[2];
-    const leftEar = keypoints[3];
-    const rightEar = keypoints[4];
     const leftShoulder = keypoints[5];
     const rightShoulder = keypoints[6];
     const leftElbow = keypoints[7];
@@ -90,62 +113,81 @@ export class FallDetectionService {
     const hipMidpoint = this.calculateMidpoint(leftHip, rightHip);
     const headMidpoint = this.calculateMidpoint(leftEye, rightEye);
 
-    // Enhanced fall detection logic
+    // Advanced pose analysis
+    const poseAnalysis = this.analyzePose(pose);
+    const motionAnalysis = this.analyzeMotion(pose);
+    const positionAnalysis = this.analyzePosition(pose);
+
+    // Determine current pose state
+    const currentPoseState = this.determinePoseState(poseAnalysis, motionAnalysis, positionAnalysis);
+
+    // Update pose state
+    this.lastPoseState = {
+      ...currentPoseState,
+      lastUpdate: new Date(),
+    };
+
+    // Fall detection logic
     let fallConfidence = 0;
     let reasons: string[] = [];
 
-    // 1. Check if person is lying down (horizontal position)
-    const bodyAngle = this.calculateBodyAngle(shoulderMidpoint, hipMidpoint);
-    const isHorizontal = Math.abs(bodyAngle) > 30; // More sensitive threshold
-
-    if (isHorizontal) {
-      fallConfidence += 0.4;
+    // 1. Check for lying position (horizontal body)
+    if (poseAnalysis.isHorizontal) {
+      fallConfidence += 0.3;
       reasons.push('horizontal body position');
     }
 
-    // 2. Check if head is below shoulders (person on ground)
-    const headBelowShoulders = headMidpoint.y > shoulderMidpoint.y + 30;
-    if (headBelowShoulders) {
-      fallConfidence += 0.3;
+    // 2. Check for head below shoulders
+    if (poseAnalysis.headBelowShoulders) {
+      fallConfidence += 0.25;
       reasons.push('head below shoulders');
     }
 
     // 3. Check for sudden vertical movement (falling motion)
-    const hasSuddenDrop = this.checkSuddenDrop(pose);
-    if (hasSuddenDrop) {
-      fallConfidence += 0.5;
+    if (motionAnalysis.hasSuddenDrop) {
+      fallConfidence += 0.4;
       reasons.push('sudden vertical movement');
     }
 
-    // 4. Check if person is close to ground (ankles near bottom of frame)
-    const isNearGround = this.checkNearGround(pose);
-    if (isNearGround) {
-      fallConfidence += 0.2;
-      reasons.push('near ground level');
+    // 4. Check for rapid movement (falling dynamics)
+    if (motionAnalysis.hasRapidMovement) {
+      fallConfidence += 0.35;
+      reasons.push('rapid movement detected');
     }
 
-    // 5. Check for unusual pose (arms/legs in unexpected positions)
-    const hasUnusualPose = this.checkUnusualPose(pose);
-    if (hasUnusualPose) {
-      fallConfidence += 0.3;
+    // 5. Check for unusual pose (falling position)
+    if (poseAnalysis.hasUnusualPose) {
+      fallConfidence += 0.2;
       reasons.push('unusual body position');
     }
 
-    // 6. Check for rapid movement (falling motion)
-    const hasRapidMovement = this.checkRapidMovement(pose);
-    if (hasRapidMovement) {
-      fallConfidence += 0.4;
-      reasons.push('rapid movement detected');
+    // 6. Check for ground proximity
+    if (positionAnalysis.isNearGround) {
+      fallConfidence += 0.15;
+      reasons.push('near ground level');
+    }
+
+    // 7. Check for extended lying position (differentiate from sleeping)
+    if (currentPoseState.lying && this.consecutiveLyingFrames > this.LYING_THRESHOLD) {
+      fallConfidence += 0.2;
+      reasons.push('extended lying position');
     }
 
     // Store pose history for analysis
     this.lastPoses.push(pose);
-    if (this.lastPoses.length > 15) { // Increased history for better analysis
+    if (this.lastPoses.length > 20) { // Increased history for better analysis
       this.lastPoses.shift();
     }
 
+    // Update consecutive frame counters
+    if (currentPoseState.lying) {
+      this.consecutiveLyingFrames++;
+    } else {
+      this.consecutiveLyingFrames = 0;
+    }
+
     // Determine if fall has occurred
-    const hasFallen = fallConfidence > 0.6; // Lower threshold for faster detection
+    const hasFallen = fallConfidence > 0.5; // Lower threshold for faster detection
 
     if (hasFallen) {
       this.consecutiveFallFrames++;
@@ -158,64 +200,57 @@ export class FallDetectionService {
       confidence: fallConfidence,
       reason: reasons.join(', ') || 'normal posture',
       pose,
+      poseState: this.lastPoseState,
     };
   }
 
-  private calculateMidpoint(point1: PoseKeypoint, point2: PoseKeypoint) {
-    return {
-      x: (point1.x + point2.x) / 2,
-      y: (point1.y + point2.y) / 2,
-    };
-  }
-
-  private calculateBodyAngle(shoulderMidpoint: { x: number; y: number }, hipMidpoint: { x: number; y: number }): number {
-    return Math.atan2(
-      hipMidpoint.x - shoulderMidpoint.x,
-      shoulderMidpoint.y - hipMidpoint.y
-    ) * (180 / Math.PI);
-  }
-
-  private checkSuddenDrop(currentPose: Pose): boolean {
-    if (this.lastPoses.length < 3) return false;
-
-    const previousPose = this.lastPoses[this.lastPoses.length - 1];
-    const currentHead = currentPose.keypoints[0]; // nose
-    const previousHead = previousPose.keypoints[0];
-
-    // Check for sudden vertical movement (falling)
-    const verticalChange = currentHead.y - previousHead.y;
-    return verticalChange > 80; // pixels - more sensitive
-  }
-
-  private checkNearGround(pose: Pose): boolean {
-    const leftAnkle = pose.keypoints[15];
-    const rightAnkle = pose.keypoints[16];
-    
-    // Check if ankles are near the bottom of the frame
-    const frameHeight = 480; // Assuming 480p video
-    const ankleY = Math.max(leftAnkle.y, rightAnkle.y);
-    
-    return ankleY > frameHeight * 0.8; // Ankles in bottom 20% of frame
-  }
-
-  private checkUnusualPose(pose: Pose): boolean {
+  private analyzePose(pose: Pose) {
     const keypoints = pose.keypoints;
     const leftShoulder = keypoints[5];
     const rightShoulder = keypoints[6];
     const leftHip = keypoints[11];
     const rightHip = keypoints[12];
+    const leftEye = keypoints[1];
+    const rightEye = keypoints[2];
 
-    // Check if shoulders are at very different heights (person might be lying)
+    const shoulderMidpoint = this.calculateMidpoint(leftShoulder, rightShoulder);
+    const hipMidpoint = this.calculateMidpoint(leftHip, rightHip);
+    const headMidpoint = this.calculateMidpoint(leftEye, rightEye);
+
+    // Calculate body angle
+    const bodyAngle = this.calculateBodyAngle(shoulderMidpoint, hipMidpoint);
+    const isHorizontal = Math.abs(bodyAngle) > this.FALL_ANGLE_THRESHOLD;
+
+    // Check head position
+    const headBelowShoulders = headMidpoint.y > shoulderMidpoint.y + 20;
+
+    // Check for unusual pose
     const shoulderHeightDiff = Math.abs(leftShoulder.y - rightShoulder.y);
     const hipHeightDiff = Math.abs(leftHip.y - rightHip.y);
+    const hasUnusualPose = shoulderHeightDiff > 40 || hipHeightDiff > 40;
 
-    return shoulderHeightDiff > 50 || hipHeightDiff > 50;
+    return {
+      isHorizontal,
+      headBelowShoulders,
+      hasUnusualPose,
+      bodyAngle,
+    };
   }
 
-  private checkRapidMovement(pose: Pose): boolean {
-    if (this.lastPoses.length < 5) return false;
+  private analyzeMotion(pose: Pose) {
+    if (this.lastPoses.length < 3) {
+      return { hasSuddenDrop: false, hasRapidMovement: false };
+    }
 
-    // Check for rapid movement in the last few frames
+    const previousPose = this.lastPoses[this.lastPoses.length - 1];
+    const currentHead = pose.keypoints[0];
+    const previousHead = previousPose.keypoints[0];
+
+    // Check for sudden vertical movement
+    const verticalChange = currentHead.y - previousHead.y;
+    const hasSuddenDrop = verticalChange > this.VERTICAL_MOVEMENT_THRESHOLD;
+
+    // Check for rapid movement
     let totalMovement = 0;
     for (let i = 1; i < this.lastPoses.length; i++) {
       const current = this.lastPoses[i];
@@ -233,12 +268,110 @@ export class FallDetectionService {
     }
 
     const averageMovement = totalMovement / (this.lastPoses.length - 1);
-    return averageMovement > 30; // High average movement indicates falling
+    const hasRapidMovement = averageMovement > this.RAPID_MOVEMENT_THRESHOLD;
+
+    return {
+      hasSuddenDrop,
+      hasRapidMovement,
+      averageMovement,
+    };
+  }
+
+  private analyzePosition(pose: Pose) {
+    const leftAnkle = pose.keypoints[15];
+    const rightAnkle = pose.keypoints[16];
+    
+    // Check if ankles are near the bottom of the frame
+    const frameHeight = 480;
+    const ankleY = Math.max(leftAnkle.y, rightAnkle.y);
+    const isNearGround = ankleY > frameHeight * 0.8;
+
+    return {
+      isNearGround,
+    };
+  }
+
+  private determinePoseState(
+    poseAnalysis: any,
+    motionAnalysis: any,
+    positionAnalysis: any
+  ): PoseState {
+    let standing = false;
+    let sitting = false;
+    let lying = false;
+    let falling = false;
+    let confidence = 0;
+
+    // Determine primary pose state
+    if (poseAnalysis.isHorizontal) {
+      lying = true;
+      confidence = 0.8;
+    } else if (poseAnalysis.bodyAngle < 15) {
+      standing = true;
+      confidence = 0.9;
+    } else if (poseAnalysis.bodyAngle < 45) {
+      sitting = true;
+      confidence = 0.7;
+    }
+
+    // Check for falling motion
+    if (motionAnalysis.hasSuddenDrop || motionAnalysis.hasRapidMovement) {
+      falling = true;
+      confidence = Math.max(confidence, 0.6);
+    }
+
+    return {
+      standing,
+      sitting,
+      lying,
+      falling,
+      confidence,
+      lastUpdate: new Date(),
+    };
+  }
+
+  private calculateMidpoint(point1: PoseKeypoint, point2: PoseKeypoint) {
+    return {
+      x: (point1.x + point2.x) / 2,
+      y: (point1.y + point2.y) / 2,
+    };
+  }
+
+  private calculateBodyAngle(shoulderMidpoint: { x: number; y: number }, hipMidpoint: { x: number; y: number }): number {
+    return Math.atan2(
+      hipMidpoint.x - shoulderMidpoint.x,
+      shoulderMidpoint.y - hipMidpoint.y
+    ) * (180 / Math.PI);
+  }
+
+  // Get current pose state for UI display
+  getCurrentPoseState(): PoseState {
+    return this.lastPoseState;
+  }
+
+  // Update detection sensitivity
+  updateSensitivity(settings: {
+    fallThreshold?: number;
+    confidenceThreshold?: number;
+    verticalMovementThreshold?: number;
+  }): void {
+    if (settings.fallThreshold) this.FALL_THRESHOLD = settings.fallThreshold;
+    if (settings.confidenceThreshold) this.CONFIDENCE_THRESHOLD = settings.confidenceThreshold;
+    if (settings.verticalMovementThreshold) this.VERTICAL_MOVEMENT_THRESHOLD = settings.verticalMovementThreshold;
   }
 
   reset(): void {
     this.consecutiveFallFrames = 0;
+    this.consecutiveLyingFrames = 0;
     this.lastPoses = [];
+    this.lastPoseState = {
+      standing: false,
+      sitting: false,
+      lying: false,
+      falling: false,
+      confidence: 0,
+      lastUpdate: new Date(),
+    };
   }
 
   // Method to manually trigger a fall for testing
@@ -250,6 +383,14 @@ export class FallDetectionService {
       pose: {
         keypoints: [],
         score: 0.8,
+      },
+      poseState: {
+        standing: false,
+        sitting: false,
+        lying: true,
+        falling: true,
+        confidence: 0.9,
+        lastUpdate: new Date(),
       },
     };
   }
