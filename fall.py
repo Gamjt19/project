@@ -1,25 +1,27 @@
 from flask import Flask, Response, jsonify
-fall_alert = False
-
+from flask_cors import CORS
 import cv2
 import mediapipe as mp
 import time
-from flask import Flask, Response
+import winsound
 
+
+# Flask app setup
 app = Flask(__name__)
+CORS(app)
 
 mp_pose = mp.solutions.pose
 pose = mp_pose.Pose()
 mp_drawing = mp.solutions.drawing_utils
 
+fall_alert = False
 fall_detected = False
 fall_start_time = 0
 FALL_THRESHOLD = 10  # Seconds
 
 def gen_frames():
-    global fall_alert
+    global fall_alert, fall_detected, fall_start_time
     cap = cv2.VideoCapture(0)
-    global fall_detected, fall_start_time
     while cap.isOpened():
         success, frame = cap.read()
         if not success:
@@ -44,14 +46,12 @@ def gen_frames():
                     fall_detected = True
                 elif time.time() - fall_start_time > FALL_THRESHOLD:
                     cv2.putText(image, 'FALL DETECTED!', (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
-                    fall_alert = True
+                    if not fall_alert:
+                        winsound.Beep(2000, 1000)
+                        fall_alert = True
             else:
                 fall_detected = False
-                    fall_alert = False
-@app.route('/fall_status')
-def fall_status():
-    global fall_alert
-    return jsonify({'fall_detected': fall_alert})
+                fall_alert = False
 
         ret, buffer = cv2.imencode('.jpg', image)
         frame = buffer.tobytes()
@@ -62,6 +62,11 @@ def fall_status():
 @app.route('/video_feed')
 def video_feed():
     return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/fall_status')
+def fall_status():
+    global fall_alert
+    return jsonify({'fall_detected': fall_alert})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
