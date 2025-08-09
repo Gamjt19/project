@@ -17,7 +17,7 @@ import {
 import { dataService } from '../services/dataService';
 import { alertService } from '../services/alertService';
 import { Elder, Alert, DashboardStats } from '../types';
-import { CameraFeed } from './CameraFeed';
+import CameraFeed from './CameraFeed';
 import { AlertHistory } from './AlertHistory';
 import { ElderProfile } from './ElderProfile';
 import { CameraTest } from './CameraTest';
@@ -43,6 +43,40 @@ export const Dashboard: React.FC = () => {
   });
   const [showFallAlert, setShowFallAlert] = useState(false);
   const [lastFallAlert, setLastFallAlert] = useState<Alert | null>(null);
+
+  // Poll for fall detection from backend (must be after state declarations)
+  useEffect(() => {
+    let pollInterval: NodeJS.Timeout;
+    const pollFallStatus = async () => {
+      try {
+        const res = await fetch('http://localhost:5000/fall_status');
+        const data = await res.json();
+        if (data.fall_detected && selectedElder) {
+          // Only trigger if not already showing
+          if (!showFallAlert) {
+            await alertService.sendEmergencyAlert(selectedElder, 'fall_detected');
+            setAlerts(alertService.getAlerts());
+            updateStats();
+            setLastFallAlert({
+              id: 'fall-' + Date.now(),
+              type: 'fall_detected',
+              description: 'Fall detected by AI system',
+              timestamp: new Date(),
+              severity: 'critical',
+              acknowledged: false,
+              elderId: selectedElder.id,
+            });
+            setShowFallAlert(true);
+            setTimeout(() => setShowFallAlert(false), 10000);
+          }
+        }
+      } catch (err) {
+        // Ignore errors for now
+      }
+    };
+    pollInterval = setInterval(pollFallStatus, 3000);
+    return () => clearInterval(pollInterval);
+  }, [selectedElder, showFallAlert]);
 
   useEffect(() => {
     // Load existing data
@@ -373,10 +407,7 @@ export const Dashboard: React.FC = () => {
         {activeTab === 'monitoring' && (
           <div className="space-y-6">
             {selectedElder ? (
-              <CameraFeed
-                elder={selectedElder}
-                onFallDetected={handleFallDetected}
-              />
+              <CameraFeed />
             ) : (
               <div className="text-center py-12">
                 <Heart className="w-12 h-12 text-gray-400 mx-auto mb-4" />
